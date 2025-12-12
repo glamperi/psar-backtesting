@@ -21,6 +21,13 @@ DATA_DIR = PROJECT_ROOT / 'data'
 RUNS_DIR = DATA_DIR / 'runs'
 SIGNATURES_FILE = DATA_DIR / 'signatures.json'
 
+# Portfolio positions (from Fidelity export)
+# This file contains actual cost basis for P&L calculations
+POSITIONS_FILE = Path(os.environ.get(
+    'POSITIONS_FILE',
+    SCANNER_DIR / 'data' / 'mypositions.csv'
+))
+
 # Ensure directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RUNS_DIR.mkdir(parents=True, exist_ok=True)

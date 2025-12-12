@@ -23,12 +23,20 @@ MODES:
     -m all          Both Strong and Early (default)
     -m dividend     Dividend stocks only
 
+CHECK-SELLS OPTIONS:
+--------------------
+    --preview, -p   Show sells with cost basis P&L (no auto-close)
+                    Reads mypositions.csv for actual cost basis
+    --from-file, -f Use existing scanner HTML (faster than live scan)
+
 EXAMPLES:
 ---------
     python bt.py process scanner_output.html --mode strong
     python bt.py signatures
     python bt.py report 20251212
-    python bt.py check-sells
+    python bt.py check-sells --preview           # Review sells with P&L
+    python bt.py check-sells -p -f mystocks.html # Fast preview from file
+    python bt.py check-sells                     # Auto-close sells
     python bt.py live
     python bt.py close NVDA --signature 20251212
 """
@@ -44,6 +52,7 @@ from signatures import SignatureManager, Signature
 from file_parser import parse_file, parse_content, get_buy_tickers
 from scanner_bridge import ScannerBridge
 from prices import PriceFetcher
+from positions import PositionsManager
 
 
 class BacktestCLI:
@@ -53,6 +62,7 @@ class BacktestCLI:
         self.sig_mgr = SignatureManager()
         self.scanner = ScannerBridge()
         self.prices = PriceFetcher()
+        self.positions = PositionsManager()
     
     # =========================================================================
     # PROCESS FILE
@@ -277,14 +287,27 @@ class BacktestCLI:
     # CHECK SELLS
     # =========================================================================
     
-    def cmd_check_sells(self, from_file: Optional[str] = None) -> dict:
+    def cmd_check_sells(self, from_file: Optional[str] = None, preview: bool = False) -> dict:
         """
         Check all open positions for sells.
+        
+        Args:
+            from_file: Parse existing HTML file (fast) instead of calling scanner
+            preview: If True, show sells with P&L but don't auto-close
         
         If from_file provided, parses that file for sells (fast).
         Otherwise, calls the scanner to check live (slow).
         """
-        print("🔍 Checking open positions for sells...")
+        if preview:
+            print("🔍 Reviewing positions for sell signals...")
+        else:
+            print("🔍 Checking open positions for sells...")
+        
+        # Load portfolio positions for cost basis P&L
+        self.positions.load()
+        has_positions = len(self.positions) > 0
+        if has_positions:
+            print(f"   📊 Loaded {len(self.positions)} positions from mypositions.csv")
         
         # Get all open positions across all signatures
         all_open = self.sig_mgr.get_all_open_positions()
@@ -316,12 +339,112 @@ class BacktestCLI:
             print("✅ No positions in Sell zone")
             return {'success': True, 'closed': 0}
         
-        print(f"   Found {len(sells)} in Sell zone: {', '.join(sells)}")
+        print(f"   Found {len(sells)} in Sell zone")
         
         # Get exit prices
         exit_prices = self.prices.get_current_prices(list(sells))
         
-        # Close positions
+        # =====================================================================
+        # PREVIEW MODE: Show P&L but don't close
+        # =====================================================================
+        if preview:
+            print(f"\n{'='*70}")
+            print("🔴 SELL SIGNALS - Review Before Acting")
+            print(f"{'='*70}")
+            
+            # Build detailed sell info
+            sell_details = []
+            for ticker in sells:
+                current_price = exit_prices.get(ticker, 0)
+                
+                # Get signal info from signatures
+                signal_date = None
+                signal_price = None
+                for sig_id, pos in all_open.get(ticker, []):
+                    signal_date = pos.entry_date
+                    signal_price = pos.entry_price
+                    break
+                
+                # Get cost basis from mypositions.csv
+                portfolio_pos = self.positions.get(ticker)
+                cost_basis = portfolio_pos.cost_basis if portfolio_pos else None
+                current_value = portfolio_pos.value if portfolio_pos else None
+                
+                # Calculate P&L
+                if cost_basis and cost_basis > 0 and current_value:
+                    pnl_pct = ((current_value - cost_basis) / cost_basis) * 100
+                elif signal_price and signal_price > 0 and current_price:
+                    pnl_pct = ((current_price - signal_price) / signal_price) * 100
+                else:
+                    pnl_pct = None
+                
+                sell_details.append({
+                    'ticker': ticker,
+                    'signal_date': signal_date,
+                    'signal_price': signal_price,
+                    'cost_basis': cost_basis,
+                    'current_price': current_price,
+                    'current_value': current_value,
+                    'pnl_pct': pnl_pct,
+                    'has_cost_basis': cost_basis is not None
+                })
+            
+            # Sort by P&L (biggest losses first - tax loss harvesting candidates)
+            sell_details.sort(key=lambda x: x['pnl_pct'] if x['pnl_pct'] is not None else 0)
+            
+            # Print header
+            print(f"\n{'Ticker':<8} {'Signal Date':<12} {'Signal $':<10} {'Cost Basis':<12} {'Current $':<10} {'P&L %':<10} {'Action'}")
+            print("-" * 80)
+            
+            for d in sell_details:
+                ticker = d['ticker']
+                sig_date = d['signal_date'][:10] if d['signal_date'] else 'N/A'
+                sig_price = f"${d['signal_price']:.2f}" if d['signal_price'] else 'N/A'
+                cost = f"${d['cost_basis']:,.0f}" if d['cost_basis'] else 'N/A'
+                current = f"${d['current_price']:.2f}" if d['current_price'] else 'N/A'
+                
+                if d['pnl_pct'] is not None:
+                    pnl = d['pnl_pct']
+                    if pnl < -10:
+                        pnl_str = f"🔴 {pnl:+.1f}%"
+                        action = "TAX LOSS?"
+                    elif pnl < 0:
+                        pnl_str = f"🟠 {pnl:+.1f}%"
+                        action = "Small loss"
+                    elif pnl > 20:
+                        pnl_str = f"🟢 {pnl:+.1f}%"
+                        action = "TAKE PROFIT?"
+                    else:
+                        pnl_str = f"🟢 {pnl:+.1f}%"
+                        action = "Small gain"
+                else:
+                    pnl_str = "N/A"
+                    action = ""
+                
+                print(f"{ticker:<8} {sig_date:<12} {sig_price:<10} {cost:<12} {current:<10} {pnl_str:<10} {action}")
+            
+            print("-" * 80)
+            
+            # Summary
+            losses = [d for d in sell_details if d['pnl_pct'] is not None and d['pnl_pct'] < 0]
+            gains = [d for d in sell_details if d['pnl_pct'] is not None and d['pnl_pct'] > 0]
+            
+            print(f"\n📊 Summary:")
+            print(f"   {len(losses)} positions at a LOSS (tax loss harvest candidates)")
+            print(f"   {len(gains)} positions at a GAIN (take profit candidates)")
+            
+            if losses:
+                biggest_loss = min(sell_details, key=lambda x: x['pnl_pct'] if x['pnl_pct'] is not None else 0)
+                print(f"   ⚠️  Biggest loss: {biggest_loss['ticker']} at {biggest_loss['pnl_pct']:.1f}%")
+            
+            print(f"\n💡 To close a position: python bt.py close TICKER")
+            print(f"   To close all sells:  python bt.py check-sells  (without --preview)")
+            
+            return {'success': True, 'preview': True, 'sells': sell_details}
+        
+        # =====================================================================
+        # NORMAL MODE: Auto-close positions
+        # =====================================================================
         closed_count = 0
         closed_details = []
         
@@ -673,6 +796,8 @@ Examples:
     # check-sells
     p_sells = subparsers.add_parser('check-sells', help='Check for sells')
     p_sells.add_argument('-f', '--from-file', help='Use existing scanner output file (faster)')
+    p_sells.add_argument('-p', '--preview', action='store_true', 
+                         help='Preview sells with P&L from cost basis (no auto-close)')
     
     # live
     p_live = subparsers.add_parser('live', help='Show live P/L')
@@ -719,7 +844,7 @@ Examples:
         print(cli.cmd_report(args.signature))
     
     elif args.command == 'check-sells':
-        cli.cmd_check_sells(args.from_file)
+        cli.cmd_check_sells(args.from_file, preview=args.preview)
     
     elif args.command == 'live':
         print(cli.cmd_live())
