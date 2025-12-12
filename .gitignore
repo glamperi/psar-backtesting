@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+# Data files (keep structure, ignore content)
+data/signatures.json
+data/runs/
+data/reports/
+
+# OS
+.DS_Store
+*.swp
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# Temp files
+/tmp/
+*.tmp

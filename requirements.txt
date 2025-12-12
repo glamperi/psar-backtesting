@@ -1,0 +1,5 @@
+# PSAR Backtesting Requirements
+yfinance>=0.2.36
+pandas>=2.0.0
+pytz>=2024.1
+beautifulsoup4>=4.12.0
